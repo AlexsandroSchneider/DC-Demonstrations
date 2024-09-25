@@ -1,2 +1,2 @@
-# DC-Connection-Demonstration
-Demonstration of connection using sockets in Python, developed for the Distributed Computing subject.
+# DC-Demonstrations
+Demonstrations developed for the Distributed Computing subject, using sockets in Python.
