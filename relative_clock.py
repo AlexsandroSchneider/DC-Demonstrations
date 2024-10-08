@@ -47,6 +47,7 @@ def treat_messages(client_socket):
                 message = f"ack(msg({msg[0]},{msg[1]}))"
                 print(f"Sent ACK {message} @TR.id = {tr_id}")
                 client_socket.send(message.encode('utf-8'))
+                break
         for msg in acks:
             if float(msg[1]) <= tr_id:
                 msg = acks.pop(acks.index(msg))
@@ -58,7 +59,7 @@ def treat_messages(client_socket):
                 print(f"Executed {msg} -> balance = {balance}, New TR.id = {tr}.{pid}")
                 break
         mutex.release()
-        sleep(0.01)
+        sleep(0.1)
 
 def port_in_use(host, port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
