@@ -7,6 +7,8 @@ server_address, dht_node_id, response = None, None, None
 messages_history, clients, dht, routing_table = [], [], [], []
 timeStamp = 1
 dht_node_size = 10
+resources = {}
+
 
 #########
 class Person:
@@ -50,6 +52,8 @@ def handle_application(client_socket):
             message = client_socket.recv(1024).decode('utf-8')
             if message.lower() == '!sair':
                 break
+            elif message.startswith('RES_'):
+                resource_requests(client_socket, message[4:])
             elif message == 'get_all_records()':
                 print("SELF get_all_records()")
                 get_all_records(client_socket)
@@ -60,7 +64,7 @@ def handle_application(client_socket):
     print(f"Cliente desconectado: {client_name}")
 
 def handle_client(client_socket):
-    global running, messages_history, timeStamp, response, dht_node_size
+    global running, messages_history, timeStamp, response, dht_node_size, resources
     client_socket.send(f"listening_port({server_address[1]})".encode('utf-8'))
     while running:
         try:
@@ -96,6 +100,25 @@ def handle_client(client_socket):
                 print(f"RESP {process_response} to {client_socket.getpeername()}\n")
                 client_socket.send(process_response.encode('utf-8'))
                 continue
+            elif message.startswith('REQ_'):
+                if message[4:] in ['OK', 'DENIED'] or message[4:].startswith('REG'):
+                    response = message
+                    continue
+                if resources.get(message[4:]):
+                    client_socket.send("REQ_DENIED".encode('utf-8'))
+                    print("REQ_" + message[4:] + "_DENIED")
+                else:
+                    reg = get_record_if_node(message[4:])
+                    if reg:
+                        client_socket.send(f"REQ_REG_{reg}".encode('utf-8'))
+                        print(f"REQ_REG_{reg}")
+                        continue
+                    client_socket.send("REQ_OK".encode('utf-8'))
+                    print("REQ_" + message[4:] + "_OK")
+            elif message.startswith('SET_'):
+                resources[message[4:]] = 1
+            elif message.startswith('REL_'):
+                resources.pop(message[4:])
             elif message.startswith('start_dht('):
                 dht_node_size = int(message[10:-1])
                 start_dht()
@@ -123,6 +146,69 @@ def broadcast(message):
         except:
             pass
 
+def resource_requests(client_socket, msg):
+    global resources, response
+    print(msg)
+    res = msg[:-1].split('(')[1]
+    if msg.startswith('RELEASE'):
+        broadcast(f"REL_{res}")
+        resources.pop(res)
+    else:
+        if resources.get(res):
+            client_socket.send(f"DENIED({res})".encode('utf-8'))
+            print(f"DENIED({res})")
+            return
+        reg = get_record_if_node(res)
+        count = len(clients)
+        for client in clients:
+            client[0].send(f"REQ_{res}".encode('utf-8'))
+            while response == None:
+                sleep(0.1)
+            if response == 'REQ_OK':
+                count -= 1
+            elif response.startswith('REQ_REG_'):
+                reg = response[8:]
+                count -= 1
+            response = None
+        if count == 0:
+            resources[res] = 1
+            broadcast(f"SET_{res}")
+            if reg:
+                client_socket.send(f"APPROVED({reg})".encode('utf-8'))
+            else:
+                client_socket.send(f"APPROVED({res})".encode('utf-8'))
+            print(f"APPROVED({res})")
+        else:
+            client_socket.send(f"DENIED({res})".encode('utf-8'))
+            print(f"DENIED({res})")
+
+def get_record_if_node(id):
+    h_idx = hash_idx_node(int(id))
+    if routing_table[dht_node_id][1] <= h_idx <= routing_table[dht_node_id][2]:
+        h_dht = h_idx - (dht_node_id * dht_node_size)
+        reg = get_record(id, h_dht)
+        if reg:
+            return reg.get_all()
+        return None
+
+def get_record(id, h_idx):
+    for reg in dht[h_idx]:
+        if reg.get_id() == id:
+            return reg
+    return None
+
+def get_node_records():
+    records = []
+    for rec_list in dht:
+        for rec in rec_list:
+            records.append(rec.get_all())
+    msg = ""
+    for rec in records:
+        msg += str(rec)
+        if rec != records[-1]:
+            msg += ";"
+    return msg
+
 def get_all_records(client_socket):
     global response
     node_records = []
@@ -148,18 +234,6 @@ def get_all_records(client_socket):
     print(f"RESP {msg}\n")
     client_socket.send(msg.encode('utf-8'))
 
-def get_node_records():
-    records = []
-    for rec_list in dht:
-        for rec in rec_list:
-            records.append(rec.get_all())
-    msg = ""
-    for rec in records:
-        msg += str(rec)
-        if rec != records[-1]:
-            msg += ";"
-    return msg
-
 def msg_get_parts(msg):
     if msg.startswith('insert('):
         parts = msg[7:-1].replace("'",'').split(';')
@@ -175,40 +249,35 @@ def msg_get_parts(msg):
         parts.append(3)
     return parts
 
-def get_record(id, h_idx):
-    for reg in dht[h_idx]:
-        if reg.get_id() == id:
-            return reg
-    return None
-        
 def hash_idx_node(val):
     return val % (dht_node_size * len(routing_table))
 
 def process_message(msg):
     parts = msg_get_parts(msg)
-    h_idx = hash_idx_node(int(parts[0])) - (dht_node_id * dht_node_size) ## hash idx on list
-    reg = get_record(parts[0], h_idx)
+    h_dht = hash_idx_node(int(parts[0])) - (dht_node_id * dht_node_size) ## hash idx on dht list
+    reg = get_record(parts[0], h_dht)
     if parts[-1] == 0:
         if not reg:
-            dht[h_idx].append(Person(parts[0], parts[1], int(parts[2])))
-            return f"resp_Inclusão do cadastro concluído! Nó: {dht_node_id}, HASH: ID % {dht_node_size * len(routing_table)}: {hash_idx_node(int(parts[0]))}"
+            dht[h_dht].append(Person(parts[0], parts[1], int(parts[2])))
+            return f"resp_Inclusão do cadastro concluído! Nó: {dht_node_id}, Hash DHT: {hash_idx_node(int(parts[0]))}, Hash NODE: {h_dht}"
         return f"resp_Já existe cadastro com ID {parts[0]}"
     elif parts[-1] == 1:
         if reg:
             reg.set_name(parts[1])
             reg.set_age(int(parts[2]))
-            return f"resp_Atualização do cadastro concluída! Nó: {dht_node_id}, HASH: ID % {dht_node_size * len(routing_table)}: {hash_idx_node(int(parts[0]))}"
+            return f"resp_Atualização do cadastro concluída! Nó: {dht_node_id}, Hash DHT: {hash_idx_node(int(parts[0]))}, Hash NODE: {h_dht}"
         return f"resp_Não existe cadastro com ID {parts[0]}"
     elif parts[-1] == 2:
         if reg:
             id, name, age = reg.get_all()
-            message = f"ID: {id}, Nome: {name}, Idade: {age}. Nó: {dht_node_id}, HASH: ID % {dht_node_size * len(routing_table)} = {hash_idx_node(int(parts[0]))}"
+            message = f"ID: {id}, Nome: {name}, Idade: {age}. Nó: {dht_node_id}, Hash DHT: {hash_idx_node(int(parts[0]))}, Hash NODE: {h_dht}"
             return f"resp_{message}"
         return f"resp_Não existe cadastro com ID {parts[0]}"
     elif parts[-1] == 3:
         if reg:
-            dht[h_idx].remove(reg)
-            return "resp_Cadastro removido!"
+            dht[h_dht].remove(reg)
+            message = f"Cadastro removido! Nó: {dht_node_id}, Hash DHT: {hash_idx_node(int(parts[0]))}, Hash NODE: {h_dht}"
+            return f"resp_{message}"
         return f"resp_Não existe cadastro com ID {parts[0]}"
     return "Algo de errado não está certo..."
 
@@ -281,7 +350,7 @@ def messaging():
             timeStamp += 1
             if message.lower().removeprefix('!') in ['ajuda','help','h']:
                 print("\nComandos:\n'!S' -> Iniciar serviço DHT\n'!C' -> Conectar a um Nó")
-                print("'!L' -> Listar cadastros\n'!RT' -> Ver tabela Routing\n\n")
+                print("'!L' -> Listar cadastros\n'!RT' -> Ver tabela Routing\n'!RC' Ver recursos em uso\n\n")
             elif message.lower() == '!c':
                 connect_to()
                 continue
@@ -301,10 +370,13 @@ def messaging():
             elif message.lower() == '!rt':
                 if not starting:
                     print("\nTABELA ROUTING:")
-                    for node in routing_table:
-                        print(f"Nó: {node[0]} -> índices:({node[1]} - {node[2]})")
+                    for i, node in enumerate(routing_table):
+                        print(f"Nó: {i} ({node[0]}) -> índices:({node[1]} - {node[2]})")
                 else:
                     print("\nDHT não iniciado, digite '!s' para iniciar com os nós atuais.\n")
+                continue
+            elif message.lower() == '!rc':
+                print(resources)
                 continue
             elif message.lower() == '!l':
                 print("\nLista de cadastros:")
